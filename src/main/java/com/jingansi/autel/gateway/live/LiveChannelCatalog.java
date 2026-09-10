@@ -1,0 +1,192 @@
+package com.jingansi.autel.gateway.live;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.jingansi.autel.gateway.autel.AutelApiException;
+import com.jingansi.autel.gateway.config.AutelGatewayProperties;
+import com.jingansi.autel.gateway.domain.DeviceTarget;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.EnumMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+
+/** 从 liveStatus 生成前端需要的视频目录，并解析当前直播状态。 */
+@Component
+@Slf4j
+@RequiredArgsConstructor
+public class LiveChannelCatalog {
+    private static final Set<String> VIDEO_TYPES =
+            Set.of("normal", "wide", "zoom", "ir", "nightvision");
+
+    private final AutelLivePort autelLivePort;
+    private final AutelGatewayProperties properties;
+    private volatile Map<DeviceTarget, List<LiveChannel>> channels = emptyCatalog();
+
+    public synchronized Map<DeviceTarget, List<LiveChannel>> refresh() {
+        JsonNode data = autelLivePort.getLiveStatus(
+                properties.getDevices().getDockSn(), properties.getDevices().getAircraftSn()).path("data");
+        EnumMap<DeviceTarget, List<LiveChannel>> result = new EnumMap<>(DeviceTarget.class);
+        result.put(DeviceTarget.DOCK, parse(data.path("masterLiveStatus"),
+                properties.getDevices().getDockSn()));
+        result.put(DeviceTarget.AIRCRAFT, parse(data.path("slaveLiveStatus"),
+                properties.getDevices().getAircraftSn()));
+        channels = Collections.unmodifiableMap(result);
+        log.info("SkyCC 视频目录刷新完成 dockChannels={} aircraftChannels={}",
+                result.get(DeviceTarget.DOCK).size(), result.get(DeviceTarget.AIRCRAFT).size());
+        return channels;
+    }
+
+    public LiveChannel resolve(DeviceTarget target, String videoId) {
+        LiveChannel found = find(target, videoId);
+        if (found == null) {
+            refresh();
+            found = find(target, videoId);
+        }
+        if (found == null) {
+            throw new AutelApiException("未找到视频通道: " + videoId);
+        }
+        return found;
+    }
+
+    public List<LiveChannel> activeChannels(LiveChannel requested) {
+        JsonNode data = autelLivePort.getCapacity(requested.getSourceSn()).path("data");
+        if (!data.isArray()) {
+            return Collections.emptyList();
+        }
+        List<LiveChannel> active = new ArrayList<>();
+        for (JsonNode item : data) {
+            if (!item.path("active").asBoolean(false)) {
+                continue;
+            }
+            String videoId = item.path("video_id").asText("").trim();
+            String type = normalizeType(item.path("video_type").asText(""), videoId);
+            if (!videoId.startsWith(requested.getSourceSn() + "/") || !VIDEO_TYPES.contains(type)) {
+                continue;
+            }
+            active.add(new LiveChannel(requested.getSourceSn(), videoId, type,
+                    item.path("camera_index").asText(""), null, Collections.emptyList(),
+                    item.path("url").asText("")));
+        }
+        return active;
+    }
+
+    /** JASmart 物模型的视频目录属性。 */
+    public Map<String, Object> modelProperties(DeviceTarget target) {
+        List<Map<String, Object>> videoList = new ArrayList<>();
+        List<LiveChannel> current = channels.getOrDefault(target, Collections.emptyList());
+        for (LiveChannel channel : current) {
+            Map<String, Object> video = new LinkedHashMap<>();
+            video.put("name", target == DeviceTarget.DOCK
+                    ? "机场视频-" + channel.getCameraIndex()
+                    : "飞机视频-" + lensName(channel.getVideoType()));
+            video.put("videoId", channel.getVideoId());
+            List<String> types = channel.getSwitchableVideoTypes().isEmpty()
+                    ? Collections.singletonList(channel.getVideoType())
+                    : channel.getSwitchableVideoTypes();
+            video.put("videoTypes", target == DeviceTarget.DOCK
+                    ? videoType(channel.getVideoType()) : videoTypes(types));
+            videoList.add(video);
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("videoList", videoList);
+        return result;
+    }
+
+    public Map<String, Object> videoListProperty(DeviceTarget target) {
+        return Collections.singletonMap("videoList", modelProperties(target).get("videoList"));
+    }
+
+    public Map<DeviceTarget, List<LiveChannel>> snapshot() {
+        return channels;
+    }
+
+    private LiveChannel find(DeviceTarget target, String videoId) {
+        List<LiveChannel> candidates = channels.getOrDefault(target, Collections.emptyList());
+        if (videoId != null && !videoId.trim().isEmpty()) {
+            return candidates.stream()
+                    .filter(channel -> videoId.equals(channel.getVideoId()))
+                    .findFirst().orElse(null);
+        }
+        return null;
+    }
+
+    private static List<LiveChannel> parse(JsonNode array, String sourceSn) {
+        if (!array.isArray()) {
+            return Collections.emptyList();
+        }
+        List<LiveChannel> result = new ArrayList<>();
+        for (JsonNode item : array) {
+            String videoId = item.path("video_id").asText("").trim();
+            String type = normalizeType(item.path("video_type").asText(""), videoId);
+            if (!videoId.startsWith(sourceSn + "/") || !VIDEO_TYPES.contains(type)) {
+                continue;
+            }
+            List<String> switchableTypes = new ArrayList<>();
+            item.path("switchable_video_types").forEach(value -> {
+                String candidate = value.asText("").toLowerCase(Locale.ROOT);
+                if (VIDEO_TYPES.contains(candidate)) {
+                    switchableTypes.add(candidate);
+                }
+            });
+            Integer cameraPosition = item.has("camera_position") && item.get("camera_position").canConvertToInt()
+                    ? item.get("camera_position").intValue() : null;
+            result.add(new LiveChannel(sourceSn, videoId, type,
+                    item.path("camera_index").asText(""), cameraPosition,
+                    switchableTypes, item.path("url").asText("")));
+        }
+        return Collections.unmodifiableList(result);
+    }
+
+    private static String normalizeType(String source, String videoId) {
+        String type = source == null ? "" : source.trim().toLowerCase(Locale.ROOT);
+        if (!type.isEmpty()) {
+            return type;
+        }
+        String[] segments = videoId.split("/", -1);
+        if (segments.length != 3) {
+            return "";
+        }
+        int separator = segments[2].indexOf('-');
+        return (separator > 0 ? segments[2].substring(0, separator) : segments[2])
+                .toLowerCase(Locale.ROOT);
+    }
+
+    private static Map<String, String> videoType(String type) {
+        Map<String, String> result = new LinkedHashMap<>();
+        result.put("name", lensName(type));
+        result.put("type", type);
+        return result;
+    }
+
+    private static List<Map<String, String>> videoTypes(List<String> types) {
+        List<Map<String, String>> result = new ArrayList<>();
+        types.forEach(type -> result.add(videoType(type)));
+        return result;
+    }
+
+    private static String lensName(String type) {
+        if (type == null) { return "默认"; }
+        switch (type.toLowerCase(Locale.ROOT)) {
+            case "zoom": return "变焦";
+            case "wide": return "广角";
+            case "ir": return "红外";
+            case "nightvision": return "夜视";
+            case "normal": return "普通";
+            default: return type;
+        }
+    }
+
+    private static Map<DeviceTarget, List<LiveChannel>> emptyCatalog() {
+        EnumMap<DeviceTarget, List<LiveChannel>> result = new EnumMap<>(DeviceTarget.class);
+        result.put(DeviceTarget.DOCK, Collections.emptyList());
+        result.put(DeviceTarget.AIRCRAFT, Collections.emptyList());
+        return Collections.unmodifiableMap(result);
+    }
+}

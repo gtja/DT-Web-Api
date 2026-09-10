@@ -1,0 +1,52 @@
+spring:
+  application:
+    name: autel-uav-gateway
+  main:
+    web-application-type: none
+  task:
+    scheduling:
+      pool:
+        size: 3
+      thread-name-prefix: autel-scheduler-
+
+autel:
+  gateway:
+    enabled: false
+    skycc:
+      base-url: https://skycc.autelrobotics.cn
+      websocket-url: wss://skycc.autelrobotics.cn/api/cc-websocket/ws/webSocket
+      username: ""
+      password: ""
+      tenant-id:
+      connect-timeout: 10s
+      read-timeout: 20s
+      token-refresh-skew: 5m
+      websocket-ping-interval: 25s
+    devices:
+      dock-sn: "YOUR_DOCK_SN"
+      aircraft-sn: "YOUR_AIRCRAFT_SN"
+    jasmart:
+      endpoint: "tcp://YOUR_MQTT_HOST:1883"
+      username: ""
+      password: ""
+      connect-timeout: 15s
+      topology-check-interval-ms: 5000
+      dock:
+        product-key: "00000000001"
+        device-id: "YOUR_PLATFORM_DEVICE_ID"
+        device-secret: ""
+      aircraft:
+        product-key: "00000000002"
+        device-id: "YOUR_PLATFORM_DEVICE_ID"
+    live:
+      protocol: RTMP
+      url-type: 1
+      quality: 3
+      operation-timeout: 30s
+      catalog-refresh-interval-ms: 60000
+
+logging:
+  level:
+    root: INFO
+    com.jingansi.autel.gateway: INFO
+    com.jingansi.smart: INFO
