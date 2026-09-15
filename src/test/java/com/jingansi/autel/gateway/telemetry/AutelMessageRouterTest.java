@@ -14,8 +14,24 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.never;
+import static org.mockito.ArgumentMatchers.anyMap;
 
 class AutelMessageRouterTest {
+
+    @Test
+    void shouldForwardFirmwareOnlyForBoundAircraftFromDockOsd() {
+        JASmartGatewayManager gatewayManager = mock(JASmartGatewayManager.class);
+        router(gatewayManager).route("{\"method\":\"osd_property\",\"deviceKind\":3,\"serialNumber\":\"DOCK\","
+                + "\"data\":{\"sub_device\":{\"device_sn\":\"AIR\",\"firmware_version\":\"12.1.3.7\"}}}");
+        verify(gatewayManager).report(DeviceTarget.AIRCRAFT, Map.of("firmwareVersion", "12.1.3.7"));
+        verify(gatewayManager, never()).setAircraftOnline(true);
+
+        JASmartGatewayManager other = mock(JASmartGatewayManager.class);
+        router(other).route("{\"method\":\"osd_property\",\"deviceKind\":3,\"serialNumber\":\"DOCK\","
+                + "\"data\":{\"sub_device\":{\"device_sn\":\"OTHER\",\"firmware_version\":\"wrong\"}}}");
+        verify(other, never()).report(eq(DeviceTarget.AIRCRAFT), anyMap());
+    }
 
     @Test
     void shouldDropTelemetryWithoutAnyDeviceIdentity() {
@@ -40,6 +56,40 @@ class AutelMessageRouterTest {
         ArgumentCaptor<Map<String, Object>> data = ArgumentCaptor.forClass(Map.class);
         verify(gatewayManager).report(eq(DeviceTarget.DOCK), data.capture());
         assertThat(data.getValue()).containsEntry("windSpeed", 2.5D);
+    }
+
+    @Test
+    void shouldSendFrontendExtensionsOnlyToDock() {
+        JASmartGatewayManager dockGateway = mock(JASmartGatewayManager.class);
+        router(dockGateway).route("{\"method\":\"osd_property\",\"deviceKind\":3,\"serialNumber\":\"DOCK\","
+                + "\"data\":{\"mode_code\":0,\"temperature\":25.8}}");
+        verify(dockGateway).report(DeviceTarget.DOCK,
+                Map.of("modeCode", 0, "modeDisplay", "0", "temperature", 25.8D));
+        verify(dockGateway, never()).report(eq(DeviceTarget.AIRCRAFT), anyMap());
+
+        JASmartGatewayManager aircraftGateway = mock(JASmartGatewayManager.class);
+        router(aircraftGateway).route("{\"method\":\"osd_property\",\"deviceKind\":0,\"serialNumber\":\"AIR\","
+                + "\"data\":{\"mode_code\":0,\"temperature\":25.8}}");
+        verify(aircraftGateway).report(DeviceTarget.AIRCRAFT, Map.of("modeCode", 0));
+        verify(aircraftGateway, never()).report(eq(DeviceTarget.DOCK), anyMap());
+    }
+
+    @Test
+    void shouldKeepAircraftFrontendFieldsOffDockReports() {
+        String payload = "\"data\":{\"height\":10,\"battery\":{\"capacity_percent\":77},\"attitude_head\":45}}";
+        JASmartGatewayManager dockGateway = mock(JASmartGatewayManager.class);
+        router(dockGateway).route("{\"method\":\"osd_property\",\"deviceKind\":3,\"serialNumber\":\"DOCK\"," + payload);
+        verify(dockGateway).report(DeviceTarget.DOCK, Map.of("height", 10));
+        verify(dockGateway, never()).report(eq(DeviceTarget.AIRCRAFT), anyMap());
+
+        JASmartGatewayManager aircraftGateway = mock(JASmartGatewayManager.class);
+        router(aircraftGateway).route("{\"method\":\"osd_property\",\"deviceKind\":0,\"serialNumber\":\"AIR\"," + payload);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> data = ArgumentCaptor.forClass(Map.class);
+        verify(aircraftGateway).report(eq(DeviceTarget.AIRCRAFT), data.capture());
+        assertThat(data.getValue()).containsEntry("electricity", 77).containsEntry("altitude", 10)
+                .containsEntry("uavYaw", 45).doesNotContainKeys("modeDisplay", "temperature");
+        verify(aircraftGateway, never()).report(eq(DeviceTarget.DOCK), anyMap());
     }
 
     @Test

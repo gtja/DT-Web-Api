@@ -76,8 +76,14 @@ public class AutelMessageRouter {
             gatewayManager.report(DeviceTarget.DOCK, mapped);
             Map<String, Object> live = aircraftMapper.mapLiveStatus(
                     data.path("live_status"), properties.getDevices().getAircraftSn());
+            JsonNode subDevice = data.path("sub_device");
+            if (properties.getDevices().getAircraftSn()
+                    .equalsIgnoreCase(subDevice.path("device_sn").asText(""))) {
+                // 当前机型的飞机固件版本由机巢携带，只转发配置绑定的飞机。
+                MappingSupport.copyText(subDevice, "firmware_version", live, "firmwareVersion", 64);
+            }
             if (!live.isEmpty()) {
-                log.info("飞机直播状态转换结果 sn={} data={}",
+                log.info("机巢携带的飞机属性转换结果 sn={} data={}",
                         properties.getDevices().getAircraftSn(), live);
                 gatewayManager.report(DeviceTarget.AIRCRAFT, live);
             }

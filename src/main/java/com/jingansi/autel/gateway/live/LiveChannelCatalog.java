@@ -11,6 +11,7 @@ import org.springframework.stereotype.Component;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -59,41 +60,73 @@ public class LiveChannelCatalog {
     /** 每次启动重新获取带鉴权参数的播放地址，绝不把设备的推流 url 当作拉流地址。 */
     public String playbackUrl(String sourceSn, String videoId) {
         if (!videoId.startsWith(sourceSn + "/")) {
-            throw new IllegalArgumentException("videoId 不属于当前设备");
+            throw new IllegalArgumentException("拉流必须使用当前设备的真实通道 ID");
+        }
+        return playbackSource(sourceSn, videoId).getUrl();
+    }
+
+    /** live 从实际已开流通道中选择；明确的真实 ID 只匹配指定通道。 */
+    public PlaybackSource playbackSource(String sourceSn, String videoId) {
+        boolean businessId = "live".equalsIgnoreCase(videoId);
+        if (!businessId && !videoId.startsWith(sourceSn + "/")) {
+            throw new IllegalArgumentException("拉流必须使用当前设备的真实通道 ID");
         }
         JsonNode data = autelLivePort.getCapacity(sourceSn).path("data");
         if (!data.isArray() && !data.isNull() && !data.isMissingNode()) {
             throw new AutelApiException("capacity 返回格式异常");
         }
+        List<JsonNode> candidates = new ArrayList<>();
         for (JsonNode item : data) {
-            if (!videoId.equals(item.path("video_id").asText()) || !item.path("active").asBoolean()) {
-                continue;
+            String id = item.path("video_id").asText();
+            if (businessId ? id.startsWith(sourceSn + "/") && item.path("active").asBoolean()
+                    : videoId.equals(id)) {
+                candidates.add(item);
             }
-            // 优先 RTMP，其次 RTSP、HTTP-FLV；WEBRTC 地址不能直接交给普通 FFmpeg 拉取。
-            for (String type : List.of("rtmp", "rtsp", "flv")) {
-                for (JsonNode stream : item.path("live_streams")) {
-                    if (!type.equalsIgnoreCase(stream.path("type").asText())
-                            || (stream.hasNonNull("videoId") && !videoId.equals(stream.path("videoId").asText()))) {
-                        continue;
+        }
+        if (candidates.isEmpty()) {
+            throw new AutelApiException(businessId
+                    ? "道通当前设备没有已开流通道，请先在天穹开启直播"
+                    : "道通未返回目标通道: " + videoId);
+        }
+        // 多路均已开流时保持确定顺序；不使用 liveStatus 的可选镜头目录选流。
+        candidates.sort(Comparator.comparing(item -> item.path("video_id").asText()));
+        for (JsonNode item : candidates) {
+            if (!item.path("active").asBoolean()) {
+                throw new AutelApiException("道通目标通道尚未开流，请先在天穹开启该通道直播");
+            }
+            String sourceVideoId = item.path("video_id").asText();
+            String url = findPlaybackUrl(item, sourceVideoId);
+            if (url != null) {
+                return new PlaybackSource(sourceVideoId, url);
+            }
+        }
+        throw new AutelApiException("目标通道已开流，但没有可转推的 RTMP/RTSP/HTTP-FLV 播放地址");
+    }
+
+    private String findPlaybackUrl(JsonNode item, String videoId) {
+        // 优先 RTMP，其次 RTSP、HTTP-FLV；WEBRTC 地址不能直接交给普通 FFmpeg 拉取。
+        for (String type : List.of("rtmp", "rtsp", "flv")) {
+            for (JsonNode stream : item.path("live_streams")) {
+                if (!type.equalsIgnoreCase(stream.path("type").asText())
+                        || (stream.hasNonNull("videoId") && !videoId.equals(stream.path("videoId").asText()))) {
+                    continue;
+                }
+                String url = stream.path("url").asText("").trim();
+                try {
+                    URI uri = URI.create(url);
+                    String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
+                    if (uri.getHost() != null && (("rtmp".equals(type) && Set.of("rtmp", "rtmps").contains(scheme))
+                            || ("rtsp".equals(type) && "rtsp".equals(scheme))
+                            || ("flv".equals(type) && Set.of("http", "https").contains(scheme)))) {
+                        log.info("SkyCC 取得转推源地址 videoId={} type={} url={}", videoId, type, url);
+                        return url;
                     }
-                    String url = stream.path("url").asText("").trim();
-                    try {
-                        URI uri = URI.create(url);
-                        String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
-                        if (uri.getHost() != null && (("rtmp".equals(type) && Set.of("rtmp", "rtmps").contains(scheme))
-                                || ("rtsp".equals(type) && "rtsp".equals(scheme))
-                                || ("flv".equals(type) && Set.of("http", "https").contains(scheme)))) {
-                            log.info("SkyCC 取得转推源地址 videoId={} type={} url={}", videoId, type, url);
-                            return url;
-                        }
-                    } catch (IllegalArgumentException ignored) {
-                        // 跳过无效候选地址，继续寻找同一通道的其他协议。
-                    }
+                } catch (IllegalArgumentException ignored) {
+                    // 跳过无效候选地址，继续寻找同一通道的其他协议。
                 }
             }
-            throw new AutelApiException("目标通道已开流，但没有可转推的 RTMP/RTSP/HTTP-FLV 播放地址");
         }
-        throw new AutelApiException("道通目标通道尚未开流，请先在天穹开启该通道直播");
+        return null;
     }
 
     public List<LiveChannel> activeChannels(LiveChannel requested) {
@@ -127,7 +160,8 @@ public class LiveChannelCatalog {
             video.put("name", target == DeviceTarget.DOCK
                     ? "机场视频-" + channel.getCameraIndex()
                     : "飞机视频-" + lensName(channel.getVideoType()));
-            video.put("videoId", channel.getVideoId());
+            // 仅上报属性使用 live，内部仍保留道通完整通道 ID。
+            video.put("videoId", "live");
             List<String> types = channel.getSwitchableVideoTypes().isEmpty()
                     ? Collections.singletonList(channel.getVideoType())
                     : channel.getSwitchableVideoTypes();

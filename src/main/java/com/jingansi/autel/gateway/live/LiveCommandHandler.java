@@ -11,6 +11,7 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -31,6 +32,8 @@ public class LiveCommandHandler {
     private final FfmpegStreamRelay streamRelay;
     private final MediaServerPort mediaServerPort;
     private final AutelGatewayProperties properties;
+    // 仅由 autel-live 单线程访问；STOP 使用 START 时绑定的真实通道，不重新查道通。
+    private final Map<DeviceTarget, String> liveVideoIds = new EnumMap<>(DeviceTarget.class);
     private final ExecutorService executor = Executors.newSingleThreadExecutor(task -> {
         Thread thread = new Thread(task, "autel-live");
         thread.setDaemon(false);
@@ -62,19 +65,27 @@ public class LiveCommandHandler {
             if (!("START".equals(action) || "STOP".equals(action))) {
                 throw new IllegalArgumentException("action 只支持 START 或 STOP");
             }
-            if (videoId.isEmpty() || "live".equalsIgnoreCase(videoId)) {
-                throw new IllegalArgumentException("videoId 必须填写 videoList 中的完整通道 ID");
+            if (videoId.isEmpty()) {
+                throw new IllegalArgumentException("videoId 不能为空");
             }
             String sourceSn = target == DeviceTarget.DOCK
                     ? properties.getDevices().getDockSn() : properties.getDevices().getAircraftSn();
-            if (!videoId.startsWith(sourceSn + "/")) {
+            boolean businessId = "live".equalsIgnoreCase(videoId);
+            String sourceVideoId = businessId ? liveVideoIds.get(target) : videoId;
+            if (sourceVideoId != null && !sourceVideoId.startsWith(sourceSn + "/")) {
                 throw new IllegalArgumentException("videoId 不属于当前设备");
             }
             if ("START".equals(action)) {
-                start(target, header, input, sourceSn, videoId);
-            } else {
-                streamRelay.stop(videoId);
+                sourceVideoId = start(target, header, input, sourceSn, videoId);
+                if (businessId) {
+                    liveVideoIds.put(target, sourceVideoId);
+                }
+            } else if (sourceVideoId != null) {
+                streamRelay.stop(sourceVideoId);
+                liveVideoIds.remove(target, sourceVideoId);
             }
+            log.info("JASmart live 通道解析 target={} action={} videoId={} sourceVideoId={}",
+                    target, action, videoId, sourceVideoId);
             Map<String, Object> result = result("OK", "OK");
             log.info("JASmart live 成功 target={} action={} videoId={} result={}",
                     target, action, videoId, result);
@@ -87,22 +98,31 @@ public class LiveCommandHandler {
         }
     }
 
-    private void start(DeviceTarget target,
-                       MessageHeader header,
-                       Map<String, Object> input,
-                       String sourceSn, String videoId) throws Exception {
+    private String start(DeviceTarget target,
+                         MessageHeader header,
+                         Map<String, Object> input,
+                         String sourceSn, String videoId) throws Exception {
         String mediaVideoId = text(input.get("streamId"));
         if (mediaVideoId.isEmpty()) {
             mediaVideoId = "live";
         }
         PushTarget pushTarget = mediaServerPort.requestPushTarget(target, header, mediaVideoId)
                 .get(properties.getLive().getOperationTimeout().toMillis(), TimeUnit.MILLISECONDS);
-        if (streamRelay.isRunning(videoId, pushTarget.getUrl())) {
-            log.info("视频已在转推 videoId={} pushUrl={}", videoId, pushTarget.getUrl());
-            return;
+        boolean businessId = "live".equalsIgnoreCase(videoId);
+        String boundVideoId = businessId ? liveVideoIds.get(target) : videoId;
+        if (boundVideoId != null && streamRelay.isRunning(boundVideoId, pushTarget.getUrl())) {
+            log.info("视频已在转推 videoId={} pushUrl={}", boundVideoId, pushTarget.getUrl());
+            return boundVideoId;
         }
-        String sourceUrl = catalog.playbackUrl(sourceSn, videoId);
-        streamRelay.start(videoId, sourceUrl, pushTarget.getUrl());
+        PlaybackSource source = catalog.playbackSource(sourceSn, videoId);
+        log.info("JASmart live 拉流通道 target={} videoId={} sourceVideoId={}",
+                target, videoId, source.getVideoId());
+        if (businessId && boundVideoId != null && !boundVideoId.equals(source.getVideoId())) {
+            streamRelay.stop(boundVideoId);
+            liveVideoIds.remove(target);
+        }
+        streamRelay.start(source.getVideoId(), source.getUrl(), pushTarget.getUrl());
+        return source.getVideoId();
     }
 
     private static Map<String, Object> result(String code, String message) {

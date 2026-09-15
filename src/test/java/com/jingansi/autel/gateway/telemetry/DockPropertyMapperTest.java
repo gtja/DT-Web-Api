@@ -14,6 +14,62 @@ class DockPropertyMapperTest {
     private final DockPropertyMapper mapper = new DockPropertyMapper();
 
     @Test
+    void shouldMapEveryConfirmedDockModeAndAirConditioningMode() throws Exception {
+        for (int mode = 0; mode <= 4; mode++) {
+            assertThat(mapper.map(objectMapper.readTree("{\"mode_code\":" + mode + ",\"state\":43}")))
+                    .containsEntry("modeCode", mode)
+                    .containsEntry("modeDisplay", String.valueOf(mode));
+        }
+        for (int mode = 0; mode <= 3; mode++) {
+            assertThat(mapper.map(objectMapper.readTree("{\"air_conditioner\":{\"air_conditioner_state\":" + mode + "}}")))
+                    .containsEntry("airConditionerMode", mode);
+        }
+        assertThat(mapper.map(objectMapper.readTree("{\"mode_code\":5,\"state\":0}")))
+                .doesNotContainKeys("modeCode", "modeDisplay");
+        for (int mode = 4; mode <= 9; mode++) {
+            assertThat(mapper.map(objectMapper.readTree("{\"air_conditioner\":{\"air_conditioner_state\":" + mode + "}}")))
+                    .doesNotContainKey("airConditionerMode");
+        }
+    }
+
+    @Test
+    void shouldKeepIndoorAndOutdoorTemperaturesSeparate() throws Exception {
+        assertThat(mapper.map(objectMapper.readTree(
+                "{\"temperature\":25.8,\"environment_temperature\":27.7,\"mode_code\":0}")))
+                .containsEntry("temperature", 25.8D)
+                .containsEntry("environmentTemperature", 27.7D)
+                .containsEntry("modeCode", 0)
+                .containsEntry("modeDisplay", "0");
+        assertThat(mapper.map(objectMapper.readTree("{\"temperature\":0}")))
+                .containsEntry("temperature", 0);
+        assertThat(mapper.map(objectMapper.readTree("{\"temperature\":-5.5}")))
+                .containsEntry("temperature", -5.5D);
+        assertThat(mapper.map(objectMapper.readTree("{\"environment_temperature\":27.7}")))
+                .doesNotContainKeys("temperature", "modeDisplay");
+    }
+
+    @Test
+    void shouldNotInventFrontendValuesForMissingOrInvalidSource() throws Exception {
+        for (String source : new String[]{"{}", "{\"mode_code\":null,\"temperature\":null}",
+                "{\"mode_code\":0.5,\"temperature\":\"NaN\"}",
+                "{\"mode_code\":4294967296,\"temperature\":\"Infinity\"}",
+                "{\"mode_code\":-1,\"temperature\":{\"value\":25}}"}) {
+            assertThat(mapper.map(objectMapper.readTree(source)))
+                    .doesNotContainKeys("modeCode", "modeDisplay", "temperature");
+        }
+    }
+
+    @Test
+    void shouldMapSortiesLinkModeAndAircraftPowerStateWithoutConfusingOnlineWithInDock() throws Exception {
+        Map<String, Object> result = mapper.map(objectMapper.readTree("{\"work_sorties\":15,"
+                + "\"wireless_link\":{\"link_workmode\":1},\"sub_device\":{\"device_online_status\":1}}"));
+        assertThat(result).containsEntry("jobNumber", 15).containsEntry("linkWorkMode", 1)
+                .containsEntry("droneOpenProcess", 2).doesNotContainKeys("droneInDock", "isInDock");
+        assertThat(mapper.map(objectMapper.readTree("{\"sub_device\":{\"device_online_status\":0}}")))
+                .containsEntry("droneOpenProcess", 3);
+    }
+
+    @Test
     void shouldMapOnlySemanticallyCompatibleDockFields() throws Exception {
         JsonNode source = objectMapper.readTree("{\n" +
                 "  \"height\": 6.95,\n" +

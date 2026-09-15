@@ -20,7 +20,8 @@ JASmart live STOP → 停止本服务的 FFmpeg 进程 → 回复处理状态
 - `AutelTokenProvider`：RSA 加密并登录 SkyCC，缓存 token。
 - `AutelWebSocketClient`：接收 WebSocket 消息，断线后自动重连。
 - `AutelMessageRouter`：把 OSD、上下线和 `update_topo` 分发给 JASmart。
-- `DockPropertyMapper` / `AircraftPropertyMapper`：只转换附件文档与物模型能对齐的字段。
+- `DockPropertyMapper` / `AircraftPropertyMapper`：分设备转换物模型属性；机库追加 `modeDisplay`（字符串状态码）、`temperature`（舱内温度）。
+- `AircraftFrontendProperties`：只为飞机追加驾驶舱电量、绝对高、姿态角、本次航时/航程、星数、信号等展示字段，原物模型字段和控制逻辑不变。
 - `JASmartGatewayManager`：属性上报、飞机子设备拓扑、`media_server` 调用。
 - `LiveCommandHandler`：处理 MQTT 直播请求，取得推流地址和道通源地址。
 - `FfmpegStreamRelay`：启动、复用、停止 FFmpeg 转推进程，记录输出和异常。
@@ -37,23 +38,27 @@ OSD 不再经过缓存、TTL 或批量合并：收到一帧、转换一帧、上
   "action": "START",
   "protocol": "WS_FLV",
   "streamId": "上层媒体流 ID",
-  "videoId": "从 videoList 取得的完整道通通道 ID"
+  "videoId": "live"
 }
 ```
 
 - `action` 必须是 `START` 或 `STOP`。
-- `videoId` 必须传 `videoList` 中的完整 ID，不再用 `live` 猜测默认镜头。
+- 上报的 `properties.videoList[].videoId` 固定为 `live`，只用于上层业务适配，内部保留完整道通通道 ID。
+- 请求 `videoId=live` 时，从 `capacity` 中选择当前设备 `active=true` 且有可用播放地址的通道，
+  不从 `liveStatus` 的可选镜头目录猜测。多路均可用时按真实通道 ID 排序选择第一路。
+  明确传完整道通 `videoId` 时，只使用指定通道，不回退到其他镜头。
 - `streamId` 只在 START 使用；为空时向 `media_server` 传 `live`。
 - 请求中的 `protocol` 是前端播放协议；本服务向媒体服务器推送 RTMP，播放地址仍由上层媒体服务提供。
 - 同时播放不同视频通道时使用不同 `streamId`，避免两个通道争用同一个推流地址。
 
 START 流程：
 
-1. 校验 `videoId` 属于当前机场或飞机。
+1. 校验请求的 `videoId`：接受业务标识 `live`，或属于当前机场/飞机的完整道通通道 ID。
 2. 保留原请求的 `tid/bid`，调用同一设备的 `media_server`：
    `{"protocol":"RTMP","videoId":"<streamId>","type":"ACTIVE"}`。
-3. 同一通道已向该地址正常转推时直接回复成功；否则查询 SkyCC `capacity`，查找该完整
-   `video_id` 且 `active=true` 的通道，从 `live_streams` 取得播放地址（优先 RTMP，其次 RTSP、HTTP-FLV）。
+3. 已绑定通道向该地址正常转推时直接回复成功；否则查询 SkyCC `capacity`，按上述规则选择通道，
+   从同一次响应中取得真实 `video_id` 和 `live_streams` 播放地址（优先 RTMP，其次 RTSP、HTTP-FLV）。
+   转推中断后的 `START live` 会重新选取实际已开流通道，不沿用失效镜头；STOP 仍使用启动时的绑定。
 4. Java 通过 `ProcessBuilder` 启动 FFmpeg，将道通源流转推到步骤 2 的地址，不经过 shell。
 5. 检测到 FFmpeg 输出视频帧后只回复 `{"code":"OK","message":"OK"}`，不返回道通播放地址。
    此状态表示转推进程开始输出，不等同于前端已收到画面。
@@ -62,8 +67,9 @@ START 流程：
 道通目标通道必须已经有直播源；未开播时返回明确错误，需要先在天穹开启直播。不会将 capacity
 顶层的设备推流 `url` 误当作播放地址，也不会把另一个镜头的视频作为当前通道返回。
 
-STOP 只停止本服务中对应 `videoId` 的 FFmpeg，不停止道通直播，不请求 media_server。没有本地
-转推进程时也返回成功。服务正常退出时会清理全部 FFmpeg 进程。启动失败、无输出帧超时等错误
+STOP 只停止本服务中对应 `videoId` 的 FFmpeg，不停止道通直播，不请求 media_server。
+没有本地绑定时，`STOP videoId=live` 直接成功；已有绑定时使用 START 记录的真实通道，不重新查询道通。
+没有本地转推进程时也返回成功。服务正常退出时会清理全部 FFmpeg 进程。启动失败、无输出帧超时等错误
 统一走 JASmart `reply.error(...)`；启动后的意外退出打印错误日志，下次 START 会重新取得源地址并启动，
 当前不做后台自动重连。
 
@@ -106,7 +112,6 @@ FFmpeg 每半秒的进度仅在 DEBUG 输出。播放/推流 URL 可能包含鉴
 
 ## 联调前需确认
 
-- 飞机模型 `videoList[].videoId` 当前最大长度是 20，而道通实际 ID 通常超过 30；建议改为至少 64。
 - 飞机模型 `videoTypes[].type` 最大长度是 10，`nightvision` 为 11；建议改为至少 16。
 - V1.4 详细文档使用 `/api/manage/manage/api/v1/live/streams/*`，简版指导手册给出另一套直播路径；
   当前代码以 V1.4 详细接口为准，需要道通确认生产环境版本。
