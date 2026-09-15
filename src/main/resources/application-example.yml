@@ -44,6 +44,10 @@ autel:
       quality: 3
       operation-timeout: 30s
       catalog-refresh-interval-ms: 60000
+      ffmpeg-path: ffmpeg
+      transcode: false
+      relay-start-timeout: 20s
+      relay-io-timeout: 15s
 
 logging:
   level:

@@ -10,7 +10,6 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
-import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
@@ -21,108 +20,96 @@ import static org.mockito.Mockito.*;
 class LiveCommandHandlerTest {
     private static final String ID = "DOCK/10165-0-0/normal-0";
     private static final String PUSH = "rtmp://our-media/app/live";
-    private final AutelLivePort autel = mock(AutelLivePort.class);
+    private static final String SOURCE = "https://autel/video.flv?token=test&pid=1";
+    private final FfmpegStreamRelay relay = mock(FfmpegStreamRelay.class);
     private final LiveChannelCatalog catalog = mock(LiveChannelCatalog.class);
     private final MediaServerPort media = mock(MediaServerPort.class);
     private final MessageHeader header = MessageHeader.builder().tid("tid-test").bid("bid-test").build();
-    private final LiveChannel channel = new LiveChannel("DOCK", ID, "normal", "10165-0-0",
-            null, Collections.emptyList());
     private LiveCommandHandler handler;
 
     @BeforeEach
     void setUp() {
-        when(catalog.resolve(DeviceTarget.DOCK, ID)).thenReturn(channel);
+        when(catalog.playbackUrl("DOCK", ID)).thenReturn(SOURCE);
         when(media.requestPushTarget(any(), any(), anyString())).thenReturn(
                 CompletableFuture.completedFuture(new PushTarget(PUSH, "live")));
-        handler = new LiveCommandHandler(catalog, autel, media, LiveChannelCatalogTest.properties());
+        handler = new LiveCommandHandler(catalog, relay, media, LiveChannelCatalogTest.properties());
     }
 
     @AfterEach
     void tearDown() { handler.close(); }
 
     @Test
-    void shouldRequestMediaServerThenStartAndReplyOnlyStatus() {
+    void shouldRequestMediaThenFetchSourceAndRelayBeforeReplying() throws Exception {
         JASmartThingServiceReply reply = invoke("START");
         assertThat(success(reply)).isEqualTo(Map.of("code", "OK", "message", "OK"));
-        InOrder order = inOrder(catalog, media, autel, reply);
-        order.verify(catalog).resolve(DeviceTarget.DOCK, ID);
+        InOrder order = inOrder(catalog, media, relay, reply);
         order.verify(media).requestPushTarget(DeviceTarget.DOCK, header, "live");
-        order.verify(autel).start(channel, PUSH, 1, 3);
+        order.verify(relay).isRunning(ID, PUSH);
+        order.verify(catalog).playbackUrl("DOCK", ID);
+        order.verify(relay).start(ID, SOURCE, PUSH);
         order.verify(reply).complete(anyMap());
-        verifyNoMoreInteractions(autel);
+        verify(catalog, never()).resolve(any(), anyString());
     }
 
     @Test
-    void shouldUseRequestedStreamIdAndRepeatTheDirectStartFlow() {
-        Map<String, Object> request = Map.of("action", "START", "videoId", ID,
-                "streamId", "stream-7", "protocol", "WS_FLV");
-        success(invoke(DeviceTarget.DOCK, request));
-        success(invoke(DeviceTarget.DOCK, request));
-        verify(media, times(2)).requestPushTarget(DeviceTarget.DOCK, header, "stream-7");
-        verify(autel, times(2)).start(channel, PUSH, 1, 3);
-        verifyNoMoreInteractions(autel);
+    void shouldReuseRunningRelayForTheSameTargetUrl() throws Exception {
+        when(relay.isRunning(ID, PUSH)).thenReturn(true);
+        success(invoke(DeviceTarget.DOCK, Map.of("action", "START", "videoId", ID, "streamId", "stream-7")));
+        verify(media).requestPushTarget(DeviceTarget.DOCK, header, "stream-7");
+        verifyNoInteractions(catalog);
+        verify(relay, never()).start(anyString(), anyString(), anyString());
     }
 
     @Test
-    void shouldStartAircraftThroughItsOwnMediaServer() {
-        String aircraftId = "AIR/CAM/zoom-0";
-        LiveChannel aircraft = new LiveChannel("AIR", aircraftId, "zoom", "CAM", null, Collections.emptyList());
-        when(catalog.resolve(DeviceTarget.AIRCRAFT, aircraftId)).thenReturn(aircraft);
-        success(invoke(DeviceTarget.AIRCRAFT, Map.of("action", "START", "videoId", aircraftId)));
+    void shouldRelayAircraftThroughItsOwnMediaServer() throws Exception {
+        String id = "AIR/CAM/zoom-0";
+        when(catalog.playbackUrl("AIR", id)).thenReturn(SOURCE);
+        success(invoke(DeviceTarget.AIRCRAFT, Map.of("action", "START", "videoId", id)));
         verify(media).requestPushTarget(DeviceTarget.AIRCRAFT, header, "live");
-        verify(autel).start(aircraft, PUSH, 1, 3);
-        verifyNoMoreInteractions(autel);
+        verify(relay).start(id, SOURCE, PUSH);
     }
 
     @Test
-    void shouldNotStartWhenMediaServerFails() {
+    void shouldNotRelayWhenMediaServerFails() {
         when(media.requestPushTarget(any(), any(), anyString())).thenReturn(
                 CompletableFuture.failedFuture(new IllegalStateException("media unavailable")));
         JASmartThingServiceReply reply = invoke("START");
         verify(reply, timeout(2000)).error(argThat(e -> e.getMessage().contains("media unavailable")));
         verify(reply, never()).complete(anyMap());
-        verifyNoInteractions(autel);
+        verifyNoInteractions(relay, catalog);
     }
 
     @Test
-    void shouldReportAutelFailureWithoutSwitchOrStopFallback() {
-        when(autel.start(channel, PUSH, 1, 3)).thenThrow(
-                new AutelApiException("Please acquire flight control first."));
+    void shouldFailIfAutelHasNoLiveSource() throws Exception {
+        when(catalog.playbackUrl("DOCK", ID)).thenThrow(new AutelApiException("目标通道尚未开流"));
         JASmartThingServiceReply reply = invoke("START");
-        verify(reply, timeout(2000)).error(argThat(e -> e.getMessage().contains("flight control")));
+        verify(reply, timeout(2000)).error(argThat(e -> e.getMessage().contains("尚未开流")));
         verify(reply, never()).complete(anyMap());
-        verify(autel).start(channel, PUSH, 1, 3);
-        verifyNoMoreInteractions(autel);
+        verify(relay, never()).start(anyString(), anyString(), anyString());
     }
 
     @Test
-    void shouldStopWithoutMediaServerOrLocalStartHistory() {
+    void shouldReportRelayFailureWithoutSuccessfulReply() throws Exception {
+        doThrow(new IllegalStateException("FFmpeg 启动超时")).when(relay).start(ID, SOURCE, PUSH);
+        JASmartThingServiceReply reply = invoke("START");
+        verify(reply, timeout(2000)).error(argThat(e -> e.getMessage().contains("FFmpeg")));
+        verify(reply, never()).complete(anyMap());
+    }
+
+    @Test
+    void shouldStopOnlyTheLocalRelayWithoutCallingAutelOrMediaServer() {
         assertThat(success(invoke("STOP"))).isEqualTo(Map.of("code", "OK", "message", "OK"));
-        verify(autel).stop(channel, 1, 3);
-        verifyNoMoreInteractions(autel);
-        verifyNoInteractions(media);
+        verify(relay).stop(ID);
+        verifyNoMoreInteractions(relay);
+        verifyNoInteractions(media, catalog);
     }
 
     @Test
-    void shouldTreatAlreadyStoppedAsSuccessful() {
-        doThrow(new AutelApiException("Live not started")).when(autel).stop(channel, 1, 3);
-        assertThat(success(invoke("STOP"))).containsEntry("code", "OK");
-        verifyNoInteractions(media);
-    }
-
-    @Test
-    void shouldRejectOtherDeviceBeforeCallingAutel() {
+    void shouldRejectOtherDeviceBeforeCallingExternalServices() {
         JASmartThingServiceReply reply = invoke(DeviceTarget.DOCK,
                 Map.of("action", "START", "videoId", "OTHER/CAM/normal-0"));
         verify(reply, timeout(2000)).error(argThat(e -> e.getMessage().contains("不属于")));
-        verifyNoInteractions(autel, media, catalog);
-    }
-
-    @Test
-    void shouldRejectUnknownAction() {
-        JASmartThingServiceReply reply = invoke("PAUSE");
-        verify(reply, timeout(2000)).error(argThat(e -> e.getMessage().contains("START 或 STOP")));
-        verifyNoInteractions(autel, media, catalog);
+        verifyNoInteractions(relay, media, catalog);
     }
 
     private JASmartThingServiceReply invoke(String action) {

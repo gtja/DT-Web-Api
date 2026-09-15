@@ -10,8 +10,49 @@ import java.util.Collections;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class LiveChannelCatalogTest {
+
+    @Test
+    void shouldSelectExactActiveChannelPlaybackUrlAndPreferRtmp() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode capacity = mapper.readTree("{\"data\":["
+                + "{\"video_id\":\"DOCK/OTHER/normal-0\",\"active\":true,\"live_streams\":["
+                + "{\"type\":\"rtmp\",\"url\":\"rtmp://wrong/live\"}]},"
+                + "{\"video_id\":\"DOCK/CAM/normal-0\",\"active\":true,\"url\":\"rtmp://autel/publish\",\"live_streams\":["
+                + "{\"type\":\"flv\",\"url\":\"https://autel/live.flv\"},"
+                + "{\"type\":\"rtmp\",\"videoId\":\"OTHER/CAM/normal-0\",\"url\":\"rtmp://wrong/live\"},"
+                + "{\"type\":\"rtmp\",\"videoId\":\"DOCK/CAM/normal-0\",\"url\":\"rtmp://autel/play?token=a&pid=b\"}]}]}");
+        LiveChannelCatalog catalog = new LiveChannelCatalog(new FakeAutelLivePort(mapper.createObjectNode(), capacity), properties());
+        assertThat(catalog.playbackUrl("DOCK", "DOCK/CAM/normal-0"))
+                .isEqualTo("rtmp://autel/play?token=a&pid=b");
+    }
+
+    @Test
+    void shouldUseHttpFlvWhenRtmpPlaybackIsAbsent() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode capacity = mapper.readTree("{\"data\":[{\"video_id\":\"DOCK/CAM/normal-0\",\"active\":true,\"live_streams\":["
+                + "{\"type\":\"rtmp\",\"url\":\"file:///tmp/not-a-stream\"},"
+                + "{\"type\":\"flv\",\"url\":\"https://autel/live.flv?token=a&pid=b\"}]}]}");
+        LiveChannelCatalog catalog = new LiveChannelCatalog(new FakeAutelLivePort(mapper.createObjectNode(), capacity), properties());
+        assertThat(catalog.playbackUrl("DOCK", "DOCK/CAM/normal-0"))
+                .isEqualTo("https://autel/live.flv?token=a&pid=b");
+    }
+
+    @Test
+    void shouldRejectInactiveChannelAndNotFallBackToPublishUrl() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        for (boolean active : new boolean[]{false, true}) {
+            JsonNode capacity = mapper.readTree("{\"data\":[{\"video_id\":\"DOCK/CAM/normal-0\",\"active\":" + active
+                    + ",\"url\":\"rtmp://autel/publish\"}]}");
+            FakeAutelLivePort port = new FakeAutelLivePort(mapper.createObjectNode(), capacity);
+            LiveChannelCatalog catalog = new LiveChannelCatalog(port, properties());
+            assertThatThrownBy(() -> catalog.playbackUrl("DOCK", "DOCK/CAM/normal-0"))
+                    .hasMessageContaining(active ? "没有可转推" : "尚未开流");
+            assertThat(port.starts + port.stops + port.switches).isZero();
+        }
+    }
 
     @Test
     void shouldBuildVideoListFromLiveStatusWithoutHardCodedCameraIndexes() throws Exception {

@@ -42,6 +42,11 @@ public class AutelGatewayProperties {
             throw new IllegalStateException("直播画质或视频目录刷新周期配置错误");
         }
         live.protocol = protocol;
+        require(live.ffmpegPath, "autel.gateway.live.ffmpeg-path");
+        if (live.relayStartTimeout == null || live.relayStartTimeout.isZero() || live.relayStartTimeout.isNegative()
+                || live.relayIoTimeout == null || live.relayIoTimeout.isZero() || live.relayIoTimeout.isNegative()) {
+            throw new IllegalStateException("FFmpeg 启动等待和读写超时必须大于 0");
+        }
     }
 
     private static void require(String value, String name) {
@@ -111,5 +116,9 @@ public class AutelGatewayProperties {
         private int quality = 3;
         private Duration operationTimeout = Duration.ofSeconds(30);
         private long catalogRefreshIntervalMs = 60_000L;
+        private String ffmpegPath = "ffmpeg";
+        private boolean transcode;
+        private Duration relayStartTimeout = Duration.ofSeconds(20);
+        private Duration relayIoTimeout = Duration.ofSeconds(15);
     }
 }

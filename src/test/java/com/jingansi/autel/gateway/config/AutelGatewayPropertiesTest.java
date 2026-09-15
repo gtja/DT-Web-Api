@@ -3,6 +3,7 @@ package com.jingansi.autel.gateway.config;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
+import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -35,6 +36,21 @@ class AutelGatewayPropertiesTest {
         assertThatThrownBy(properties::validateForStartup)
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("https");
+    }
+
+    @Test
+    void shouldRequireFfmpegExecutableAndPositiveTimeouts() {
+        AutelGatewayProperties properties = validProperties();
+        properties.getLive().setFfmpegPath(" ");
+        assertThatThrownBy(properties::validateForStartup).hasMessageContaining("ffmpeg-path");
+
+        properties.getLive().setFfmpegPath("ffmpeg");
+        properties.getLive().setRelayStartTimeout(Duration.ZERO);
+        assertThatThrownBy(properties::validateForStartup).hasMessageContaining("必须大于 0");
+
+        properties.getLive().setRelayStartTimeout(Duration.ofSeconds(20));
+        properties.getLive().setRelayIoTimeout(Duration.ofSeconds(-1));
+        assertThatThrownBy(properties::validateForStartup).hasMessageContaining("必须大于 0");
     }
 
     private static AutelGatewayProperties validProperties() {

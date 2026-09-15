@@ -1,6 +1,5 @@
 package com.jingansi.autel.gateway.live;
 
-import com.jingansi.autel.gateway.autel.AutelApiException;
 import com.jingansi.autel.gateway.config.AutelGatewayProperties;
 import com.jingansi.autel.gateway.domain.DeviceTarget;
 import com.jingansi.smart.common.ErrorInfo;
@@ -21,7 +20,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 上层 live 能力：向 media_server 申请 RTMP 地址，再下发给 SkyCC 开流。
+ * 上层 live 能力：申请 RTMP 地址，Java 管理 FFmpeg 将道通视频转推至上层媒体服务器。
  */
 @Component
 @Slf4j
@@ -29,7 +28,7 @@ import java.util.concurrent.TimeUnit;
 public class LiveCommandHandler {
 
     private final LiveChannelCatalog catalog;
-    private final AutelLivePort autelLivePort;
+    private final FfmpegStreamRelay streamRelay;
     private final MediaServerPort mediaServerPort;
     private final AutelGatewayProperties properties;
     private final ExecutorService executor = Executors.newSingleThreadExecutor(task -> {
@@ -71,11 +70,10 @@ public class LiveCommandHandler {
             if (!videoId.startsWith(sourceSn + "/")) {
                 throw new IllegalArgumentException("videoId 不属于当前设备");
             }
-            LiveChannel channel = catalog.resolve(target, videoId);
             if ("START".equals(action)) {
-                start(target, header, input, channel);
+                start(target, header, input, sourceSn, videoId);
             } else {
-                stop(channel);
+                streamRelay.stop(videoId);
             }
             Map<String, Object> result = result("OK", "OK");
             log.info("JASmart live 成功 target={} action={} videoId={} result={}",
@@ -92,29 +90,19 @@ public class LiveCommandHandler {
     private void start(DeviceTarget target,
                        MessageHeader header,
                        Map<String, Object> input,
-                       LiveChannel channel) throws Exception {
+                       String sourceSn, String videoId) throws Exception {
         String mediaVideoId = text(input.get("streamId"));
         if (mediaVideoId.isEmpty()) {
             mediaVideoId = "live";
         }
         PushTarget pushTarget = mediaServerPort.requestPushTarget(target, header, mediaVideoId)
                 .get(properties.getLive().getOperationTimeout().toMillis(), TimeUnit.MILLISECONDS);
-        log.info("SkyCC 开始推流 videoId={} url={}", channel.getVideoId(), pushTarget.getUrl());
-        autelLivePort.start(channel, pushTarget.getUrl(),
-                properties.getLive().getUrlType(), properties.getLive().getQuality());
-    }
-
-    private void stop(LiveChannel channel) {
-        log.info("SkyCC 停止推流 videoId={}", channel.getVideoId());
-        try {
-            autelLivePort.stop(channel,
-                    properties.getLive().getUrlType(), properties.getLive().getQuality());
-        } catch (AutelApiException error) {
-            if (!(error.isLiveNotStarted() || error.isDeviceOffline())) {
-                throw error;
-            }
-            log.info("SkyCC 视频已经停止或设备离线，按停流成功处理 videoId={}", channel.getVideoId());
+        if (streamRelay.isRunning(videoId, pushTarget.getUrl())) {
+            log.info("视频已在转推 videoId={} pushUrl={}", videoId, pushTarget.getUrl());
+            return;
         }
+        String sourceUrl = catalog.playbackUrl(sourceSn, videoId);
+        streamRelay.start(videoId, sourceUrl, pushTarget.getUrl());
     }
 
     private static Map<String, Object> result(String code, String message) {
