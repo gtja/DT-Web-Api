@@ -1,0 +1,41 @@
+道通无人机网关 AMD64 部署包
+============================
+
+镜像版本：registry.jingan.com:32008/ja/autel-uav-gateway:v0.1.1.260920
+运行架构：linux/amd64
+
+目录内容：
+- registry.jingan.com_32008_ja_autel-uav-gateway_v0.1.1.260920-linux-amd64.tar.gz：离线 Docker 镜像
+- *.sha256：镜像包校验文件
+- runtime/config/application.yml：真实环境配置
+- runtime/start.sh、stop.sh、restart.sh、logs.sh：运行脚本
+
+一、将整个目录复制到服务器后校验镜像包
+
+  cd autel-uav-gateway-v0.1.1.260920-amd64
+  sha256sum -c registry.jingan.com_32008_ja_autel-uav-gateway_v0.1.1.260920-linux-amd64.tar.gz.sha256
+
+二、导入镜像
+
+  gzip -dc registry.jingan.com_32008_ja_autel-uav-gateway_v0.1.1.260920-linux-amd64.tar.gz | sudo docker load
+
+三、首次启动
+
+  cd runtime
+  sudo ./start.sh registry.jingan.com:32008/ja/autel-uav-gateway:v0.1.1.260920
+  sudo ./logs.sh
+
+四、如果服务器已经存在旧容器，必须重建容器才能换成新镜像
+
+  cd runtime
+  sudo ./stop.sh
+  sudo docker rm autel-uav-gateway
+  sudo ./start.sh registry.jingan.com:32008/ja/autel-uav-gateway:v0.1.1.260920
+  sudo ./logs.sh
+
+当前真实环境配置使用：
+- REST：http://10.91.9.147:9898
+- WebSocket：ws://10.91.9.147:9898/api/cc-websocket/ws/webSocket
+
+程序同时支持 http/https 与 ws/wss，后续可直接修改 runtime/config/application.yml，
+然后执行 sudo ./restart.sh 使配置生效。配置文件包含真实环境凭据，请妥善保管。

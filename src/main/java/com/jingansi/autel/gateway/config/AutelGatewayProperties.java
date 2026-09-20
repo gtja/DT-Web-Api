@@ -30,8 +30,7 @@ public class AutelGatewayProperties {
         require(jasmart.dock.deviceId, "autel.gateway.jasmart.dock.device-id");
         require(jasmart.aircraft.productKey, "autel.gateway.jasmart.aircraft.product-key");
         require(jasmart.aircraft.deviceId, "autel.gateway.jasmart.aircraft.device-id");
-        requireScheme(skycc.baseUrl, "https", "SkyCC REST 地址");
-        requireScheme(skycc.websocketUrl, "wss", "SkyCC WebSocket 地址");
+        requireSkyccTransport(skycc.baseUrl, skycc.websocketUrl);
         requireMqttEndpoint(jasmart.endpoint);
 
         String protocol = live.protocol.trim().toUpperCase(Locale.ROOT);
@@ -55,9 +54,19 @@ public class AutelGatewayProperties {
         }
     }
 
-    private static void requireScheme(URI uri, String scheme, String name) {
-        if (uri == null || uri.getHost() == null || !scheme.equalsIgnoreCase(uri.getScheme())) {
-            throw new IllegalStateException(name + "必须使用 " + scheme + "://");
+    private static void requireSkyccTransport(URI baseUrl, URI websocketUrl) {
+        String restScheme = baseUrl == null ? null : baseUrl.getScheme();
+        String websocketScheme = websocketUrl == null ? null : websocketUrl.getScheme();
+        boolean http = "http".equalsIgnoreCase(restScheme);
+        boolean https = "https".equalsIgnoreCase(restScheme);
+        boolean ws = "ws".equalsIgnoreCase(websocketScheme);
+        boolean wss = "wss".equalsIgnoreCase(websocketScheme);
+
+        if (baseUrl == null || baseUrl.getHost() == null || (!http && !https)) {
+            throw new IllegalStateException("SkyCC REST 地址必须使用 http:// 或 https://");
+        }
+        if (websocketUrl == null || websocketUrl.getHost() == null || (!ws && !wss)) {
+            throw new IllegalStateException("SkyCC WebSocket 地址必须使用 ws:// 或 wss://");
         }
     }
 

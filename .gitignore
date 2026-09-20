@@ -5,3 +5,7 @@ target/
 .env
 application-local.yml
 src/main/resources/application.yml
+docker/dist/
+docker/config/
+logs/
+/deploy/

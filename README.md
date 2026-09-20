@@ -100,6 +100,126 @@ mvn clean package
 java -jar target/autel-uav-gateway.jar
 ```
 
+## Docker AMD64 打包与运行
+
+`docker/Dockerfile` 使用多阶段构建：构建阶段使用 Java 11，最终 `linux/amd64`
+运行镜像内置 Java 11 JRE、CA 证书、上海时区和 FFmpeg。真实
+`src/main/resources/application.yml` 已从 Docker 构建上下文排除，不会被打进镜像。
+
+启动 Docker Desktop 或 Docker 服务后，在工程根目录执行：
+
+```bash
+./docker/build-amd64.sh
+```
+
+项目的 JASmart SDK 来自私有 Maven 仓库。构建脚本默认读取 `~/.m2/settings.xml`，并通过
+BuildKit secret 只在 Maven 构建步骤中临时挂载，仓库凭据不会写入镜像层。若文件位于其他位置：
+
+```bash
+MAVEN_SETTINGS_FILE=/绝对路径/settings.xml ./docker/build-amd64.sh
+```
+
+脚本默认生成两个本地镜像标签：
+
+- 带日期版本：`autel-uav-gateway:v0.1.0.YYMMDD`
+- 固定运行别名：`autel-uav-gateway:latest-amd64`
+
+同时在 `docker/dist/` 生成可复制到 AMD64 服务器的 `.tar.gz` 镜像包及 SHA-256 校验文件。
+自定义仓库和版本：
+
+```bash
+IMAGE_REPOSITORY=registry.example.com/ja/autel-uav-gateway \
+IMAGE_TAG=v0.1.0.260920 \
+./docker/build-amd64.sh
+```
+
+如果只需要加载到本机、不需要导出 tar：
+
+```bash
+SAVE_TAR=false ./docker/build-amd64.sh
+```
+
+运行前创建独立配置目录，并将配置模板复制为 `application.yml`：
+
+```bash
+mkdir -p docker/config
+cp src/main/resources/application-example.yml docker/config/application.yml
+```
+
+编辑 `docker/config/application.yml`，填写平台账号、设备信息，并把 `autel.gateway.enabled` 改为
+`true`。该文件已被 Git 和 Docker 构建上下文忽略，只在启动容器时把整个 `docker/config` 目录
+只读挂载到 `/opt/app/config`。
+
+容器内 FFmpeg 位于 `PATH`，配置中的 `autel.gateway.live.ffmpeg-path` 应保持为 `ffmpeg`，不能使用
+macOS 的 `/opt/homebrew/bin/ffmpeg`。Linux 服务器上的配置文件还必须允许容器 UID `10001` 读取；
+配置目录应为专用目录，不要直接挂载 `/etc` 或包含其他密钥的目录。生产环境可按以下权限部署：
+
+```bash
+sudo install -d -o root -g 10001 -m 0750 /opt/autel-uav-gateway/config
+sudo install -o root -g 10001 -m 0640 application.yml \
+  /opt/autel-uav-gateway/config/application.yml
+```
+
+使用脚本运行：
+
+```bash
+./docker/run-amd64.sh
+```
+
+默认读取 `docker/config/application.yml`。服务器使用其他配置目录时：
+
+```bash
+CONFIG_DIR=/opt/autel-uav-gateway/config ./docker/run-amd64.sh
+```
+
+原来的单文件挂载方式仍然兼容：
+
+```bash
+CONFIG_FILE=/绝对路径/application.yml ./docker/run-amd64.sh
+```
+
+同时设置 `CONFIG_FILE` 和 `CONFIG_DIR` 时优先使用 `CONFIG_FILE`。修改宿主机中的配置后，Spring Boot
+不会自动重新加载，需要重启容器。
+
+也可以在 AMD64 服务器上直接执行：
+
+```bash
+cd docker/dist
+sha256sum -c autel-uav-gateway_v0.1.0.YYMMDD-linux-amd64.tar.gz.sha256
+gzip -dc autel-uav-gateway_v0.1.0.YYMMDD-linux-amd64.tar.gz | docker load
+
+docker run -d \
+  --name autel-uav-gateway \
+  --restart unless-stopped \
+  --platform linux/amd64 \
+  --init \
+  --stop-timeout 30 \
+  --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --read-only \
+  --tmpfs /tmp:rw,noexec,nosuid,size=128m \
+  --log-opt max-size=50m \
+  --log-opt max-file=5 \
+  --add-host host.docker.internal:host-gateway \
+  -e TZ=Asia/Shanghai \
+  -e 'JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=75.0 -Dfile.encoding=UTF-8' \
+  --mount type=bind,src=/绝对路径/config,dst=/opt/app/config,readonly \
+  autel-uav-gateway:latest-amd64
+```
+
+本服务是非 Web Spring Boot 程序，只主动连接 SkyCC、JASmart MQTT 和媒体服务器，因此不需要映射
+HTTP 端口。如果 MQTT 地址就是 Docker 宿主机，配置中不要使用 `localhost`，应使用
+`host.docker.internal`；Linux 运行命令中的 `--add-host` 会将该名称映射到宿主机。
+应用默认把日志输出到标准输出；如果后续配置了文件日志，可在运行脚本前设置
+`LOG_DIR=/绝对路径/logs`，将其挂载到容器的 `/opt/app/logs`。Linux 宿主机需要确保该目录允许
+容器内 UID `10001` 写入。
+
+查看运行日志：
+
+```bash
+docker logs --follow autel-uav-gateway
+```
+
 运行后会打印：SkyCC 登录及响应状态、REST 请求/响应、WebSocket 原始消息、OSD 转换结果、
 JASmart 属性上报、子设备上下线、全量拓扑、`media_server` 请求/响应、FFmpeg 启停/输出及直播结果。
 FFmpeg 每半秒的进度仅在 DEBUG 输出。播放/推流 URL 可能包含鉴权参数，联调日志请勿公开传播。
