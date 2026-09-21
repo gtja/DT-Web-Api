@@ -28,6 +28,8 @@ JASmart live STOP → 停止本服务的 FFmpeg 进程 → 回复处理状态
 
 OSD 不再经过缓存、TTL 或批量合并：收到一帧、转换一帧、上报一帧。字段白名单和枚举转换见
 [属性映射说明](docs/property-mapping.md)。
+每次属性上报都会在属性数据中追加 `sn`：机场使用 `autel.gateway.devices.dock-sn`，
+飞机使用 `autel.gateway.devices.aircraft-sn`；上报前会复制原始属性 Map，不修改映射结果。
 
 ## live 能力
 

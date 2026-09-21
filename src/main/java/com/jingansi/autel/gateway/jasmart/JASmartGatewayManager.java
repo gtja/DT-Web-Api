@@ -20,6 +20,7 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -99,14 +100,22 @@ public class JASmartGatewayManager implements MediaServerPort {
             log.warn("JASmart 飞机属性丢弃：飞机离线 data={}", data);
             return false;
         }
+        Map<String, Object> reportData = withDeviceSn(target, data);
         try {
-            log.info("JASmart 属性上报 target={} data={}", target, data);
-            targetClient(target).thingPropertyPost(data);
+            log.info("JASmart 属性上报 target={} data={}", target, reportData);
+            targetClient(target).thingPropertyPost(reportData);
             return true;
         } catch (RuntimeException error) {
-            log.error("JASmart 属性上报失败 target={} data={}", target, data, error);
+            log.error("JASmart 属性上报失败 target={} data={}", target, reportData, error);
             return false;
         }
+    }
+
+    Map<String, Object> withDeviceSn(DeviceTarget target, Map<String, Object> data) {
+        Map<String, Object> reportData = new LinkedHashMap<>(data);
+        reportData.put("sn", target == DeviceTarget.DOCK
+                ? properties.getDevices().getDockSn() : properties.getDevices().getAircraftSn());
+        return reportData;
     }
 
     public synchronized void setAircraftOnline(boolean online) {

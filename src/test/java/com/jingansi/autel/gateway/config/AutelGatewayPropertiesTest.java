@@ -29,13 +29,40 @@ class AutelGatewayPropertiesTest {
     }
 
     @Test
-    void shouldRequireSecureSkyccTransport() {
+    void shouldAcceptHttpAndWsForPrivateSkyccTransport() {
+        AutelGatewayProperties properties = validProperties();
+        properties.getSkycc().setBaseUrl(URI.create("http://skycc.example.com"));
+        properties.getSkycc().setWebsocketUrl(URI.create("ws://skycc.example.com/ws"));
+
+        assertThatCode(properties::validateForStartup).doesNotThrowAnyException();
+    }
+
+    @Test
+    void shouldAllowRestAndWebsocketSchemesToBeConfiguredIndependently() {
         AutelGatewayProperties properties = validProperties();
         properties.getSkycc().setBaseUrl(URI.create("http://skycc.example.com"));
 
+        assertThatCode(properties::validateForStartup).doesNotThrowAnyException();
+
+        properties.getSkycc().setBaseUrl(URI.create("https://skycc.example.com"));
+        properties.getSkycc().setWebsocketUrl(URI.create("ws://skycc.example.com/ws"));
+        assertThatCode(properties::validateForStartup).doesNotThrowAnyException();
+    }
+
+    @Test
+    void shouldRejectUnsupportedSkyccSchemes() {
+        AutelGatewayProperties properties = validProperties();
+        properties.getSkycc().setBaseUrl(URI.create("ftp://skycc.example.com"));
+
         assertThatThrownBy(properties::validateForStartup)
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("https");
+                .hasMessageContaining("http:// 或 https://");
+
+        properties.getSkycc().setBaseUrl(URI.create("https://skycc.example.com"));
+        properties.getSkycc().setWebsocketUrl(URI.create("ftp://skycc.example.com/ws"));
+        assertThatThrownBy(properties::validateForStartup)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("ws:// 或 wss://");
     }
 
     @Test
