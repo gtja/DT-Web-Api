@@ -33,6 +33,67 @@ class LiveChannelCatalogTest {
     }
 
     @Test
+    void shouldSelectActiveAircraftWideInsteadOfAlphabeticallyFirstIr() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode capacity = mapper.readTree("{\"data\":["
+                + "{\"video_id\":\"AIR/CAM/ir-0\",\"video_type\":\"ir\",\"active\":true,"
+                + "\"live_streams\":[{\"type\":\"rtmp\",\"url\":\"rtmp://autel/ir\"}]},"
+                + "{\"video_id\":\"AIR/CAM/zoom-0\",\"video_type\":\"wide\",\"active\":true,"
+                + "\"live_streams\":[{\"type\":\"rtmp\",\"url\":\"rtmp://autel/wide\"}]}]}");
+        LiveChannelCatalog catalog = new LiveChannelCatalog(
+                new FakeAutelLivePort(mapper.createObjectNode(), capacity), properties());
+
+        assertThat(catalog.playbackSource("AIR", "live"))
+                .isEqualTo(new PlaybackSource("AIR/CAM/zoom-0", "rtmp://autel/wide"));
+        assertThat(catalog.playbackSource("AIR", "AIR/CAM/ir-0"))
+                .isEqualTo(new PlaybackSource("AIR/CAM/ir-0", "rtmp://autel/ir"));
+    }
+
+    @Test
+    void shouldRecognizeWideIdOnlyWhenCapacityOmitsVideoType() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode capacity = mapper.readTree("{\"data\":["
+                + "{\"video_id\":\"AIR/CAM/ir-0\",\"active\":true,"
+                + "\"live_streams\":[{\"type\":\"rtmp\",\"url\":\"rtmp://autel/ir\"}]},"
+                + "{\"video_id\":\"AIR/CAM/wide-0\",\"active\":true,"
+                + "\"live_streams\":[{\"type\":\"rtmp\",\"url\":\"rtmp://autel/wide\"}]}]}");
+        LiveChannelCatalog catalog = new LiveChannelCatalog(
+                new FakeAutelLivePort(mapper.createObjectNode(), capacity), properties());
+
+        assertThat(catalog.playbackSource("AIR", "live"))
+                .isEqualTo(new PlaybackSource("AIR/CAM/wide-0", "rtmp://autel/wide"));
+    }
+
+    @Test
+    void shouldFallBackToAircraftIrWhenWideIsInactive() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode capacity = mapper.readTree("{\"data\":["
+                + "{\"video_id\":\"AIR/CAM/ir-0\",\"video_type\":\"ir\",\"active\":true,"
+                + "\"live_streams\":[{\"type\":\"rtmp\",\"url\":\"rtmp://autel/ir\"}]},"
+                + "{\"video_id\":\"AIR/CAM/wide-0\",\"video_type\":\"wide\",\"active\":false,"
+                + "\"live_streams\":[{\"type\":\"rtmp\",\"url\":\"rtmp://autel/wide\"}]}]}");
+        LiveChannelCatalog catalog = new LiveChannelCatalog(
+                new FakeAutelLivePort(mapper.createObjectNode(), capacity), properties());
+
+        assertThat(catalog.playbackSource("AIR", "live"))
+                .isEqualTo(new PlaybackSource("AIR/CAM/ir-0", "rtmp://autel/ir"));
+    }
+
+    @Test
+    void shouldFallBackToAircraftIrWhenWideHasNoPlaybackUrl() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode capacity = mapper.readTree("{\"data\":["
+                + "{\"video_id\":\"AIR/CAM/ir-0\",\"video_type\":\"ir\",\"active\":true,"
+                + "\"live_streams\":[{\"type\":\"rtmp\",\"url\":\"rtmp://autel/ir\"}]},"
+                + "{\"video_id\":\"AIR/CAM/wide-0\",\"video_type\":\"wide\",\"active\":true}]}");
+        LiveChannelCatalog catalog = new LiveChannelCatalog(
+                new FakeAutelLivePort(mapper.createObjectNode(), capacity), properties());
+
+        assertThat(catalog.playbackSource("AIR", "live"))
+                .isEqualTo(new PlaybackSource("AIR/CAM/ir-0", "rtmp://autel/ir"));
+    }
+
+    @Test
     void shouldSkipInactiveChannelsForBusinessIdButNeverFallbackForExplicitId() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         JsonNode capacity = mapper.readTree("{\"data\":["
@@ -164,6 +225,35 @@ class LiveChannelCatalogTest {
         LiveChannel active = catalog.activeChannels(requested).get(0);
 
         assertThat(active.getUrl()).isEqualTo("rtmp://media/push/current");
+    }
+
+    @Test
+    void shouldPreferChangedOsdChannelThenFallbackWhenItHasNoPlaybackUrl() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        com.fasterxml.jackson.databind.node.ObjectNode capacity = mapper.createObjectNode();
+        com.fasterxml.jackson.databind.node.ArrayNode items = capacity.putArray("data");
+        for (String type : java.util.List.of("wide", "ir", "zoom")) {
+            com.fasterxml.jackson.databind.node.ObjectNode item = items.addObject();
+            item.put("video_id", "AIR/CAM/" + type + "-0").put("video_type", type).put("active", true);
+            item.putArray("live_streams").addObject().put("type", "rtmp").put("url", "rtmp://autel/" + type);
+        }
+        LiveChannelCatalog catalog = new LiveChannelCatalog(
+                new FakeAutelLivePort(mapper.createObjectNode(), capacity), properties());
+        com.fasterxml.jackson.databind.node.ArrayNode osd = mapper.createArrayNode();
+        osd.addObject().put("video_id", "AIR/CAM/wide-0").put("video_type", "wide").put("status", 1);
+        osd.addObject().put("video_id", "AIR/CAM/ir-0").put("video_type", "ir").put("status", 1);
+        com.fasterxml.jackson.databind.node.ObjectNode zoom = osd.addObject()
+                .put("video_id", "AIR/CAM/zoom-0").put("video_type", "wide").put("status", 1);
+        catalog.updateAircraftLiveStatus(osd, 100);
+        assertThat(catalog.playbackSource("AIR", "live").getVideoId()).isEqualTo("AIR/CAM/wide-0");
+        zoom.put("video_type", "ir");
+        catalog.updateAircraftLiveStatus(osd, 101);
+        assertThat(catalog.playbackSource("AIR", "live").getVideoId()).isEqualTo("AIR/CAM/zoom-0");
+        ((com.fasterxml.jackson.databind.node.ObjectNode) items.get(2)).putArray("live_streams");
+        assertThat(catalog.playbackSource("AIR", "live").getVideoId()).isEqualTo("AIR/CAM/wide-0");
+        assertThat(catalog.preferredAircraftVideoId()).isEqualTo("AIR/CAM/zoom-0");
+        // 显式通道请求仍不受跟随状态影响。
+        assertThat(catalog.playbackSource("AIR", "AIR/CAM/ir-0").getVideoId()).isEqualTo("AIR/CAM/ir-0");
     }
 
     static AutelGatewayProperties properties() {

@@ -86,6 +86,43 @@ class LiveCommandHandlerTest {
     }
 
     @Test
+    void shouldReplaceBoundAircraftIrWithWideOnNextLiveStart() throws Exception {
+        String irId = "AIR/CAM/ir-0";
+        String wideId = "AIR/CAM/wide-0";
+        when(catalog.playbackSource("AIR", "live"))
+                .thenReturn(new PlaybackSource(irId, SOURCE), new PlaybackSource(wideId, SOURCE));
+        success(invoke(DeviceTarget.AIRCRAFT, Map.of("action", "START", "videoId", "live")));
+        clearInvocations(relay);
+        when(relay.isRunning(irId, PUSH)).thenReturn(true);
+
+        success(invoke(DeviceTarget.AIRCRAFT, Map.of("action", "START", "videoId", "live")));
+
+        InOrder order = inOrder(relay);
+        order.verify(relay).isRunning(irId, PUSH);
+        order.verify(relay).stop(irId);
+        order.verify(relay).start(wideId, SOURCE, PUSH);
+        success(invoke(DeviceTarget.AIRCRAFT, Map.of("action", "STOP", "videoId", "live")));
+        verify(relay).stop(wideId);
+    }
+
+    @Test
+    void shouldKeepRunningAircraftStreamWhenCapacityTemporarilyFails() throws Exception {
+        String irId = "AIR/CAM/ir-0";
+        when(catalog.playbackSource("AIR", "live"))
+                .thenReturn(new PlaybackSource(irId, SOURCE))
+                .thenThrow(new AutelApiException("capacity 暂时不可用"));
+        success(invoke(DeviceTarget.AIRCRAFT, Map.of("action", "START", "videoId", "live")));
+        clearInvocations(relay);
+        when(relay.isRunning(irId, PUSH)).thenReturn(true);
+
+        success(invoke(DeviceTarget.AIRCRAFT, Map.of("action", "START", "videoId", "live")));
+
+        verify(relay).isRunning(irId, PUSH);
+        verify(relay, never()).stop(anyString());
+        verify(relay, never()).start(anyString(), anyString(), anyString());
+    }
+
+    @Test
     void shouldNotBindBusinessIdWhenRelayStartFails() throws Exception {
         doThrow(new IllegalStateException("FFmpeg 启动失败")).when(relay).start(ID, SOURCE, PUSH);
         JASmartThingServiceReply reply = invoke(DeviceTarget.DOCK, Map.of("action", "START", "videoId", "live"));
@@ -241,6 +278,67 @@ class LiveCommandHandlerTest {
 
     private JASmartThingServiceReply invoke(String action) {
         return invoke(DeviceTarget.DOCK, Map.of("action", action, "videoId", ID, "protocol", "WS_FLV"));
+    }
+
+    @Test
+    void shouldFollowWithoutNewStartAndKeepPushTargetThenStopFollowing() throws Exception {
+        String wide = "AIR/CAM/wide-0";
+        String ir = "AIR/CAM/ir-0";
+        when(catalog.playbackSource("AIR", "live")).thenReturn(new PlaybackSource(wide, SOURCE));
+        success(invoke(DeviceTarget.AIRCRAFT, Map.of("action", "START", "videoId", "live")));
+        when(relay.isRunning(wide, PUSH)).thenReturn(true);
+        when(catalog.aircraftLiveRevision()).thenReturn(1L);
+        when(catalog.preferredAircraftVideoId()).thenReturn(ir);
+        when(catalog.playbackSource("AIR", "live")).thenReturn(new PlaybackSource(ir, "rtmp://autel/ir"));
+        clearInvocations(relay, media);
+
+        handler.followAircraft();
+        InOrder order = inOrder(relay);
+        order.verify(relay).stop(wide);
+        order.verify(relay).start(ir, "rtmp://autel/ir", PUSH);
+        verifyNoInteractions(media);
+        when(relay.isRunning(ir, PUSH)).thenReturn(true);
+        clearInvocations(relay, catalog);
+        handler.followAircraft();
+        verify(catalog, never()).playbackSource(anyString(), anyString());
+        verify(relay, never()).start(anyString(), anyString(), anyString());
+
+        success(invoke(DeviceTarget.AIRCRAFT, Map.of("action", "STOP", "videoId", "live")));
+        verify(relay).stop(ir);
+        clearInvocations(relay, catalog);
+        handler.followAircraft();
+        verifyNoInteractions(relay, catalog);
+    }
+
+    @Test
+    void shouldRestoreOldInputAndRetryWhenNewRelayFails() throws Exception {
+        String wide = "AIR/CAM/wide-0";
+        String ir = "AIR/CAM/ir-0";
+        when(catalog.playbackSource("AIR", "live")).thenReturn(new PlaybackSource(wide, SOURCE));
+        success(invoke(DeviceTarget.AIRCRAFT, Map.of("action", "START", "videoId", "live")));
+        when(catalog.playbackSource("AIR", "live")).thenReturn(new PlaybackSource(ir, "rtmp://autel/ir"));
+        doThrow(new IllegalStateException("unavailable")).doNothing().when(relay)
+                .start(ir, "rtmp://autel/ir", PUSH);
+        clearInvocations(relay);
+        handler.followAircraft();
+        InOrder order = inOrder(relay);
+        order.verify(relay).stop(wide);
+        order.verify(relay).start(ir, "rtmp://autel/ir", PUSH);
+        order.verify(relay).start(wide, SOURCE, PUSH);
+        handler.followAircraft();
+        verify(relay, times(2)).start(ir, "rtmp://autel/ir", PUSH);
+    }
+
+    @Test
+    void explicitStartShouldCancelFollowWhenTakingOverItsChannel() throws Exception {
+        String wide = "AIR/CAM/wide-0";
+        when(catalog.playbackSource("AIR", "live")).thenReturn(new PlaybackSource(wide, SOURCE));
+        success(invoke(DeviceTarget.AIRCRAFT, Map.of("action", "START", "videoId", "live")));
+        when(relay.isRunning(wide, PUSH)).thenReturn(true);
+        success(invoke(DeviceTarget.AIRCRAFT, Map.of("action", "START", "videoId", wide)));
+        clearInvocations(relay, catalog);
+        handler.followAircraft();
+        verifyNoInteractions(relay, catalog);
     }
 
     private JASmartThingServiceReply invoke(DeviceTarget target, Map<String, Object> request) {

@@ -20,6 +20,26 @@ import static org.mockito.ArgumentMatchers.anyMap;
 class AutelMessageRouterTest {
 
     @Test
+    void shouldFeedBoundDockLiveStatusButIgnoreRelayStations() throws Exception {
+        com.jingansi.autel.gateway.live.LiveChannelCatalog catalog = mock(
+                com.jingansi.autel.gateway.live.LiveChannelCatalog.class);
+        AutelGatewayProperties properties = new AutelGatewayProperties();
+        properties.getDevices().setDockSn("DOCK");
+        properties.getDevices().setAircraftSn("AIR");
+        ObjectMapper mapper = new ObjectMapper();
+        AutelMessageRouter router = new AutelMessageRouter(mapper, new DockPropertyMapper(),
+                new AircraftPropertyMapper(), mock(JASmartGatewayManager.class), properties, catalog);
+        String statuses = "[{\"video_id\":\"AIR/CAM/zoom-0\",\"video_type\":\"wide\",\"status\":1}]";
+        router.route("{\"method\":\"osd_property\",\"deviceKind\":3,\"gateway\":\"DOCK\","
+                + "\"timestamp\":100,\"data\":{\"live_status\":" + statuses + "}}");
+        verify(catalog).updateAircraftLiveStatus(mapper.readTree(statuses), 100);
+        org.mockito.Mockito.clearInvocations(catalog);
+        router.route("{\"method\":\"osd_property\",\"deviceKind\":60,\"gateway\":\"STATION\","
+                + "\"timestamp\":101,\"data\":{\"live_status\":" + statuses + "}}");
+        verifyNoInteractions(catalog);
+    }
+
+    @Test
     void shouldForwardFirmwareOnlyForBoundAircraftFromDockOsd() {
         JASmartGatewayManager gatewayManager = mock(JASmartGatewayManager.class);
         router(gatewayManager).route("{\"method\":\"osd_property\",\"deviceKind\":3,\"serialNumber\":\"DOCK\","
@@ -174,6 +194,6 @@ class AutelMessageRouterTest {
         properties.getDevices().setAircraftSn("AIR");
         return new AutelMessageRouter(
                 new ObjectMapper(), new DockPropertyMapper(), new AircraftPropertyMapper(),
-                gatewayManager, properties);
+                gatewayManager, properties, mock(com.jingansi.autel.gateway.live.LiveChannelCatalog.class));
     }
 }

@@ -29,6 +29,21 @@ public class LiveChannelCatalog {
 
     private final AutelLivePort autelLivePort;
     private final AutelGatewayProperties properties;
+    private final AircraftLiveStatus aircraftStatus = new AircraftLiveStatus();
+
+    public void updateAircraftLiveStatus(JsonNode statuses, long timestamp) {
+        long previousRevision = aircraftStatus.revision();
+        aircraftStatus.update(statuses, properties.getDevices().getAircraftSn(), timestamp);
+        if (previousRevision != aircraftStatus.revision()) {
+            log.info("飞机直播状态变化 videoDeviceType=飞机 videoSn={} preferredVideoId={} selection={}",
+                    properties.getDevices().getAircraftSn(), aircraftStatus.preferred(),
+                    aircraftStatus.preferred() == null ? "广角兜底" : "OSD状态推断");
+        }
+    }
+
+    public void clearAircraftLiveStatus() { aircraftStatus.clear(); }
+    public long aircraftLiveRevision() { return aircraftStatus.revision(); }
+    public String preferredAircraftVideoId() { return aircraftStatus.preferred(); }
     private volatile Map<DeviceTarget, List<LiveChannel>> channels = emptyCatalog();
 
     public synchronized Map<DeviceTarget, List<LiveChannel>> refresh() {
@@ -65,9 +80,10 @@ public class LiveChannelCatalog {
         return playbackSource(sourceSn, videoId).getUrl();
     }
 
-    /** live 从实际已开流通道中选择；明确的真实 ID 只匹配指定通道。 */
+    /** 飞机 live 跟随 OSD 通道，无法确定时广角优先；真实 ID 只匹配指定通道。 */
     public PlaybackSource playbackSource(String sourceSn, String videoId) {
         boolean businessId = "live".equalsIgnoreCase(videoId);
+        boolean aircraftLive = businessId && sourceSn.equals(properties.getDevices().getAircraftSn());
         if (!businessId && !videoId.startsWith(sourceSn + "/")) {
             throw new IllegalArgumentException("拉流必须使用当前设备的真实通道 ID");
         }
@@ -88,8 +104,13 @@ public class LiveChannelCatalog {
                     ? "道通当前设备没有已开流通道，请先在天穹开启直播"
                     : "道通未返回目标通道: " + videoId);
         }
-        // 多路均已开流时保持确定顺序；不使用 liveStatus 的可选镜头目录选流。
-        candidates.sort(Comparator.comparing(item -> item.path("video_id").asText()));
+        // 飞机先匹配 OSD 推断通道，再用广角及其他可用流兜底。
+        // 同优先级按真实 ID 排序，且不从 liveStatus 的可选镜头目录猜测。
+        String preferred = aircraftLive ? aircraftStatus.preferred() : null;
+        candidates.sort(Comparator.comparingInt((JsonNode item) ->
+                        item.path("video_id").asText().equals(preferred) ? -1
+                                : aircraftLive && isWideChannel(item) ? 0 : 1)
+                .thenComparing(item -> item.path("video_id").asText()));
         for (JsonNode item : candidates) {
             if (!item.path("active").asBoolean()) {
                 throw new AutelApiException("道通目标通道尚未开流，请先在天穹开启该通道直播");
@@ -97,10 +118,23 @@ public class LiveChannelCatalog {
             String sourceVideoId = item.path("video_id").asText();
             String url = findPlaybackUrl(item, sourceVideoId);
             if (url != null) {
+                log.info("SkyCC 选流 videoDeviceType={} sourceSn={} requestedVideoId={} selectedVideoId={} videoType={} widePreferred={}",
+                        videoDeviceType(sourceSn), sourceSn, videoId, sourceVideoId, item.path("video_type").asText(""),
+                        aircraftLive && isWideChannel(item));
                 return new PlaybackSource(sourceVideoId, url);
             }
         }
         throw new AutelApiException("目标通道已开流，但没有可转推的 RTMP/RTSP/HTTP-FLV 播放地址");
+    }
+
+    private static boolean isWideChannel(JsonNode item) {
+        String type = item.path("video_type").asText("").trim();
+        if (!type.isEmpty()) {
+            return "wide".equalsIgnoreCase(type);
+        }
+        String videoId = item.path("video_id").asText("");
+        int lastSlash = videoId.lastIndexOf('/');
+        return lastSlash >= 0 && videoId.regionMatches(true, lastSlash + 1, "wide-", 0, 5);
     }
 
     private String findPlaybackUrl(JsonNode item, String videoId) {
@@ -118,7 +152,9 @@ public class LiveChannelCatalog {
                     if (uri.getHost() != null && (("rtmp".equals(type) && Set.of("rtmp", "rtmps").contains(scheme))
                             || ("rtsp".equals(type) && "rtsp".equals(scheme))
                             || ("flv".equals(type) && Set.of("http", "https").contains(scheme)))) {
-                        log.info("SkyCC 取得转推源地址 videoId={} type={} url={}", videoId, type, url);
+                        String videoSn = videoId.split("/", 2)[0];
+                        log.info("SkyCC 取得转推源地址 videoDeviceType={} videoSn={} videoId={} type={} url={}",
+                                videoDeviceType(videoSn), videoSn, videoId, type, url);
                         return url;
                     }
                 } catch (IllegalArgumentException ignored) {
@@ -127,6 +163,13 @@ public class LiveChannelCatalog {
             }
         }
         return null;
+    }
+
+    private String videoDeviceType(String sn) {
+        if (properties.getDevices().getAircraftSn().equalsIgnoreCase(sn)) {
+            return "飞机";
+        }
+        return properties.getDevices().getDockSn().equalsIgnoreCase(sn) ? "机库" : "未知设备";
     }
 
     public List<LiveChannel> activeChannels(LiveChannel requested) {
